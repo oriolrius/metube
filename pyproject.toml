@@ -16,6 +16,8 @@ dependencies = [
 # Conversational-agent extras. Install with `uv sync --extra agent`.
 agent = [
     "google-adk[a2a]>=2.1,<3",
+    "a2a-sdk[http-server]>=0.3,<0.4",
+    "sse-starlette",
     "litellm",
     "uvicorn",
     "opentelemetry-sdk",
