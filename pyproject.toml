@@ -12,6 +12,17 @@ dependencies = [
     "watchfiles",
 ]
 
+[project.optional-dependencies]
+# Conversational-agent extras. Install with `uv sync --extra agent`.
+agent = [
+    "google-adk[a2a]>=2.1,<3",
+    "litellm",
+    "uvicorn",
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp-proto-http",
+    "openinference-instrumentation-google-adk>=0.1.15",
+]
+
 [dependency-groups]
 dev = [
     "pylint",
