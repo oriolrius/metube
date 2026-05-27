@@ -10,7 +10,7 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock docker-entrypoint.sh ./
+COPY pyproject.toml uv.lock docker-entrypoint.sh a2a_sidecar.py ./
 
 # Use sed to strip carriage-return characters from the entrypoint script (in case building on Windows)
 # Install dependencies
@@ -28,7 +28,7 @@ RUN sed -i 's/\r$//g' docker-entrypoint.sh && \
       tini \
       build-essential && \
     curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh && \
-    UV_PROJECT_ENVIRONMENT=/usr/local uv sync --frozen --no-dev --compile-bytecode && \
+    UV_PROJECT_ENVIRONMENT=/usr/local uv sync --frozen --no-dev --extra agent --compile-bytecode && \
     uv cache clean && \
     rm -f /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/uvw && \
     curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y && \
@@ -64,8 +64,10 @@ ENV DOWNLOAD_DIR=/downloads
 ENV STATE_DIR=/downloads/.metube
 ENV TEMP_DIR=/downloads
 ENV PORT=8081
+ENV AGENT_ENABLED=false
+ENV AGENT_A2A_PORT=8082
 VOLUME /downloads
-EXPOSE 8081
+EXPOSE 8081 8082
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD curl -fsS "http://localhost:${PORT}/" || exit 1
 
 # Add build-time argument for version

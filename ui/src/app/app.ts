@@ -32,6 +32,7 @@ import {
 } from './interfaces';
 import { EtaPipe, SpeedPipe, FileSizePipe } from './pipes';
 import { SelectAllCheckboxComponent, ItemCheckboxComponent } from './components/';
+import { AgentChatComponent } from './agent/agent-chat.component';
 
 @Component({
   selector: 'app-root',
@@ -50,6 +51,7 @@ import { SelectAllCheckboxComponent, ItemCheckboxComponent } from './components/
         FileSizePipe,
         SelectAllCheckboxComponent,
         ItemCheckboxComponent,
+        AgentChatComponent,
   ],
   templateUrl: './app.html',
   styleUrl: './app.sass',

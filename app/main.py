@@ -466,7 +466,8 @@ class Notifier(DownloadQueueNotifier):
         log.info(f"Notifier: Download cleared - {id}")
         await sio.emit('cleared', serializer.encode(id))
 
-dqueue = DownloadQueue(config, Notifier())
+download_notifier = Notifier()
+dqueue = DownloadQueue(config, download_notifier)
 app.on_startup.append(lambda app: dqueue.initialize())
 app.on_cleanup.append(lambda app: Download.shutdown_manager())
 
@@ -1069,6 +1070,7 @@ if config.AGENT_ENABLED:
             app, routes,
             url_prefix=config.URL_PREFIX,
             dqueue=dqueue, submgr=submgr, config=config,
+            cookies_path=COOKIES_PATH, notifier=download_notifier,
         )
     except Exception:
         log.exception('Failed to register agent routes; continuing without agent.')

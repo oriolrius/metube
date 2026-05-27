@@ -11,6 +11,8 @@ from . import build as agent_build
 from . import config as agent_config
 from . import sse as agent_sse
 from . import tools as agent_tools
+from . import tracing as agent_tracing
+from .live_state import AgentLiveState, wrap_notifier
 
 log = logging.getLogger(__name__)
 
@@ -23,24 +25,36 @@ def register_agent_routes(
     dqueue: Any,
     submgr: Any,
     config: Any,
-) -> None:
+    cookies_path: str,
+    notifier: Any,
+) -> bool:
     """Wire the agent into MeTube. Call before `app.add_routes(routes)`.
 
-    `url_prefix` must include the trailing slash (matches MeTube's own
-    `config.URL_PREFIX` handling).
+    `url_prefix` must include the trailing slash. Returns True if the
+    agent was registered, False if it stayed disabled.
     """
     if not agent_config.AGENT_ENABLED:
-        log.info('Agent disabled (AGENT_ENABLED is false). Skipping routes.')
-        return
+        log.info('Agent disabled (AGENT_ENABLED=false). Skipping routes.')
+        return False
 
     if not agent_config.LITELLM_API_KEY:
         log.error('AGENT_ENABLED is true but LITELLM_API_KEY is empty. Refusing to start agent.')
-        return
+        return False
 
-    agent_tools.bind(dqueue=dqueue, submgr=submgr, config=config)
+    agent_tracing.setup_tracing(process_role='embedded')
+
+    state = AgentLiveState()
+    wrap_notifier(notifier, state)
+
+    agent_tools.bind(
+        dqueue=dqueue, submgr=submgr, config=config,
+        cookies_path=cookies_path, live_state=state,
+    )
     agent = agent_build.build_agent()
     runtime = agent_sse.AgentRuntime(agent)
     app['agent_runtime'] = runtime
 
     routes.post(url_prefix + 'agent/chat')(agent_sse.chat_handler)
-    log.info('Agent routes registered at %sagent/chat', url_prefix)
+    routes.post(url_prefix + 'agent/confirm')(agent_sse.confirm_handler)
+    log.info('Agent routes registered at %sagent/{chat,confirm}', url_prefix)
+    return True
