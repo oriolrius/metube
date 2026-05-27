@@ -1,71 +1,48 @@
 """In-process FunctionTools for the MeTube agent.
 
-Each tool calls MeTube's Python objects directly (D1 in PLAN.md).
-Backing references are injected via `bind(...)` at startup so this
-module has no import-time dependency on `app.main`.
+Tool signatures define the agent's surface. Each tool delegates to the
+module-level `_backend` (set by `bind()`), which is either an
+`InProcessBackend` (embedded in MeTube's aiohttp server) or an
+`HttpBackend` (used by the A2A sidecar — calls MeTube's REST API on
+localhost so the UI sees socket.io events live).
 
-HITL (D4): only `delete_downloads` and `delete_subscriptions` use
-`require_confirmation=True`. Inside those tools we call
-`tool_context.request_confirmation(...)` on the first invocation and
+HITL (D4): delete_downloads / delete_subscriptions call
+`tool_context.request_confirmation` on the first invocation and
 proceed once `tool_context.tool_confirmation` is set on resume.
 """
 
 from __future__ import annotations
 
-import logging
-import os
-from typing import Any, Optional
+from typing import Optional
 
 from google.adk.tools import FunctionTool, ToolContext
 
-log = logging.getLogger(__name__)
+from .backend import Backend
 
-# Backing objects, populated by `bind()` from app.main during startup.
-_dqueue: Any = None
-_submgr: Any = None
-_config: Any = None
-_cookies_path: Optional[str] = None
-_live_state: Any = None
+# Backend, populated by `bind()`.
+_backend: Optional[Backend] = None
 
 
-def bind(*, dqueue: Any, submgr: Any, config: Any, cookies_path: str,
-         live_state: Any = None) -> None:
-    """Inject MeTube's runtime objects into this module."""
-    global _dqueue, _submgr, _config, _cookies_path, _live_state
-    _dqueue = dqueue
-    _submgr = submgr
-    _config = config
-    _cookies_path = cookies_path
-    _live_state = live_state
+def bind(backend: Backend) -> None:
+    global _backend
+    _backend = backend
 
 
 # ─── Downloads ────────────────────────────────────────────────────────
 
 async def get_version() -> dict:
     """Return the MeTube version, yt-dlp version, and frontend-safe config snapshot."""
-    import yt_dlp.version
-    return {
-        'metube_version': os.environ.get('METUBE_VERSION', 'dev'),
-        'yt_dlp_version': yt_dlp.version.__version__,
-        'config': _config.frontend_safe() if _config else {},
-    }
+    return await _backend.get_version()
 
 
 async def list_presets() -> dict:
     """List the configured yt-dlp option preset names."""
-    return {'presets': sorted(_config.YTDL_OPTIONS_PRESETS.keys())}
+    return await _backend.list_presets()
 
 
 async def get_history() -> dict:
     """Return all downloads grouped by state: done, queue, pending."""
-    history: dict = {'done': [], 'queue': [], 'pending': []}
-    for _, v in _dqueue.queue.saved_items():
-        history['queue'].append(v.__dict__ if hasattr(v, '__dict__') else v)
-    for _, v in _dqueue.done.saved_items():
-        history['done'].append(v.__dict__ if hasattr(v, '__dict__') else v)
-    for _, v in _dqueue.pending.saved_items():
-        history['pending'].append(v.__dict__ if hasattr(v, '__dict__') else v)
-    return history
+    return await _backend.get_history()
 
 
 async def add_download(
@@ -87,23 +64,28 @@ async def add_download(
     clip_end: Optional[str] = None,
 ) -> dict:
     """Queue a download. See MeTube's POST /add for parameter semantics."""
-    return await _dqueue.add(
-        url, download_type, codec, format, quality, folder, custom_name_prefix,
-        playlist_item_limit, auto_start, split_by_chapters, chapter_template,
-        subtitle_language or 'en', subtitle_mode or 'prefer_manual',
-        ytdl_options_presets, None, clip_start, clip_end,
-    )
+    return await _backend.add_download({
+        'url': url, 'quality': quality, 'format': format,
+        'download_type': download_type, 'codec': codec,
+        'folder': folder, 'custom_name_prefix': custom_name_prefix,
+        'playlist_item_limit': playlist_item_limit,
+        'auto_start': auto_start, 'split_by_chapters': split_by_chapters,
+        'chapter_template': chapter_template,
+        'subtitle_language': subtitle_language,
+        'subtitle_mode': subtitle_mode,
+        'ytdl_options_presets': ytdl_options_presets,
+        'clip_start': clip_start, 'clip_end': clip_end,
+    })
 
 
 async def cancel_add() -> dict:
     """Cancel an in-flight `add_download` resolution (does not stop running downloads)."""
-    _dqueue.cancel_add()
-    return {'status': 'ok'}
+    return await _backend.cancel_add()
 
 
 async def start_downloads(ids: list[str]) -> dict:
     """Start one or more pending downloads."""
-    return await _dqueue.start_pending(ids)
+    return await _backend.start_downloads(ids)
 
 
 async def delete_downloads(
@@ -125,7 +107,6 @@ async def delete_downloads(
         )
         return {'status': 'awaiting_confirmation'}
 
-    # On resume, allow the UI to amend ids/where via payload.
     payload = dict(tool_context.tool_confirmation.payload or {})
     final_ids = payload.get('ids', ids)
     final_where = payload.get('where', where)
@@ -133,16 +114,14 @@ async def delete_downloads(
     if not getattr(tool_context.tool_confirmation, 'confirmed', True):
         return {'status': 'cancelled'}
 
-    if final_where == 'queue':
-        return await _dqueue.cancel(final_ids)
-    return await _dqueue.clear(final_ids)
+    return await _backend.delete_downloads(final_ids, final_where)
 
 
 # ─── Subscriptions ────────────────────────────────────────────────────
 
 async def list_subscriptions() -> dict:
     """List all subscriptions."""
-    return {'subscriptions': [s.to_public_dict() for s in _submgr.list_all()]}
+    return await _backend.list_subscriptions()
 
 
 async def subscribe(
@@ -165,26 +144,21 @@ async def subscribe(
     skip_subscriber_only: bool = False,
 ) -> dict:
     """Create a subscription. Mirrors MeTube's POST /subscribe."""
-    return await _submgr.add_subscription(
-        url,
-        check_interval_minutes=check_interval_minutes,
-        download_type=download_type,
-        codec=codec,
-        format=format,
-        quality=quality,
-        folder=folder,
-        custom_name_prefix=custom_name_prefix,
-        auto_start=auto_start,
-        playlist_item_limit=playlist_item_limit,
-        split_by_chapters=split_by_chapters,
-        chapter_template=chapter_template,
-        subtitle_language=subtitle_language or 'en',
-        subtitle_mode=subtitle_mode or 'prefer_manual',
-        ytdl_options_presets=ytdl_options_presets,
-        ytdl_options_overrides=None,
-        title_regex=title_regex,
-        skip_subscriber_only=skip_subscriber_only,
-    )
+    return await _backend.subscribe({
+        'url': url,
+        'check_interval_minutes': check_interval_minutes,
+        'download_type': download_type, 'codec': codec,
+        'format': format, 'quality': quality,
+        'folder': folder, 'custom_name_prefix': custom_name_prefix,
+        'auto_start': auto_start, 'playlist_item_limit': playlist_item_limit,
+        'split_by_chapters': split_by_chapters,
+        'chapter_template': chapter_template,
+        'subtitle_language': subtitle_language,
+        'subtitle_mode': subtitle_mode,
+        'ytdl_options_presets': ytdl_options_presets,
+        'title_regex': title_regex,
+        'skip_subscriber_only': skip_subscriber_only,
+    })
 
 
 async def update_subscription(
@@ -207,7 +181,7 @@ async def update_subscription(
     }
     if not changes:
         return {'status': 'error', 'msg': 'no fields to update'}
-    return await _submgr.update_subscription(str(id), changes)
+    return await _backend.update_subscription(str(id), changes)
 
 
 async def delete_subscriptions(
@@ -228,66 +202,41 @@ async def delete_subscriptions(
     if not getattr(tool_context.tool_confirmation, 'confirmed', True):
         return {'status': 'cancelled'}
 
-    return await _submgr.delete_subscriptions([str(i) for i in final_ids])
+    return await _backend.delete_subscriptions(final_ids)
 
 
 async def check_subscriptions_now(ids: Optional[list[str]] = None) -> dict:
     """Trigger an immediate check for one or more subscriptions (or all when ids is None)."""
-    return await _submgr.check_now([str(i) for i in ids] if ids else None)
+    return await _backend.check_subscriptions_now(ids)
 
 
 # ─── Cookies ──────────────────────────────────────────────────────────
 
 async def upload_cookies(content_b64: str) -> dict:
     """Upload a Netscape cookies.txt file (base64-encoded). 1 MB cap."""
-    import base64
-    try:
-        content = base64.b64decode(content_b64, validate=True)
-    except Exception as exc:
-        return {'status': 'error', 'msg': f'invalid base64: {exc}'}
-    if len(content) > 1_000_000:
-        return {'status': 'error', 'msg': 'Cookie file too large (max 1MB)'}
-    tmp = f'{_cookies_path}.tmp'
-    with open(tmp, 'wb') as f:
-        f.write(content)
-    os.replace(tmp, _cookies_path)
-    _config.set_runtime_override('cookiefile', _cookies_path)
-    return {'status': 'ok', 'bytes': len(content)}
+    return await _backend.upload_cookies(content_b64)
 
 
 async def delete_cookies() -> dict:
     """Remove the uploaded cookies file (if any)."""
-    if not os.path.exists(_cookies_path):
-        return {'status': 'error', 'msg': 'no uploaded cookies'}
-    os.remove(_cookies_path)
-    _config.remove_runtime_override('cookiefile')
-    ok, msg = _config.load_ytdl_options()
-    if not ok:
-        return {'status': 'error', 'msg': f'reload failed: {msg}'}
-    return {'status': 'ok'}
+    return await _backend.delete_cookies()
 
 
 async def cookie_status() -> dict:
     """Whether MeTube currently has cookies configured."""
-    configured = _config.YTDL_OPTIONS.get('cookiefile')
-    has_configured = isinstance(configured, str) and os.path.exists(configured)
-    has_uploaded = os.path.exists(_cookies_path) if _cookies_path else False
-    return {'status': 'ok', 'has_cookies': has_uploaded or has_configured}
+    return await _backend.cookie_status()
 
 
 # ─── Live state ───────────────────────────────────────────────────────
 
 async def get_live_state() -> dict:
-    """Snapshot of in-flight download events maintained by the Notifier hook."""
-    if _live_state is None:
-        return {'snapshot': None}
-    return _live_state.snapshot()
+    """Snapshot of in-flight download events."""
+    return await _backend.get_live_state()
 
 
 # ─── Tool registry ────────────────────────────────────────────────────
 
 def build_tools() -> list[FunctionTool]:
-    """Construct the FunctionTool list passed to the LlmAgent."""
     return [
         FunctionTool(get_version),
         FunctionTool(list_presets),
@@ -295,13 +244,11 @@ def build_tools() -> list[FunctionTool]:
         FunctionTool(add_download),
         FunctionTool(cancel_add),
         FunctionTool(start_downloads),
-        # delete_downloads handles confirmation manually so we can show
-        # a custom hint (item count, target queue).
-        FunctionTool(delete_downloads),
+        FunctionTool(delete_downloads),       # HITL via request_confirmation
         FunctionTool(list_subscriptions),
         FunctionTool(subscribe),
         FunctionTool(update_subscription),
-        FunctionTool(delete_subscriptions),
+        FunctionTool(delete_subscriptions),   # HITL via request_confirmation
         FunctionTool(check_subscriptions_now),
         FunctionTool(upload_cookies),
         FunctionTool(delete_cookies),

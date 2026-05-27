@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent import tools as agent_tools
+from agent.backend import InProcessBackend
 from test_agent_tools import FakeConfig, FakeDQueue, FakeSubMgr
 
 
@@ -29,10 +30,10 @@ def bound(tmp_path):
     dq = FakeDQueue()
     sm = FakeSubMgr()
     cfg = FakeConfig(str(tmp_path / 'cookies.txt'))
-    agent_tools.bind(
+    agent_tools.bind(InProcessBackend(
         dqueue=dq, submgr=sm, config=cfg,
         cookies_path=str(tmp_path / 'cookies.txt'), live_state=None,
-    )
+    ))
     return SimpleNamespace(dqueue=dq, submgr=sm)
 
 

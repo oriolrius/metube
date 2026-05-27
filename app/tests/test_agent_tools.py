@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from agent import tools as agent_tools
+from agent.backend import InProcessBackend
 
 
 class _FakeQueueDict:
@@ -110,10 +111,10 @@ def bound_tools(tmp_path):
     dq = FakeDQueue()
     sm = FakeSubMgr()
     cfg = FakeConfig(cookies_path)
-    agent_tools.bind(
+    agent_tools.bind(InProcessBackend(
         dqueue=dq, submgr=sm, config=cfg,
         cookies_path=cookies_path, live_state=None,
-    )
+    ))
     return SimpleNamespace(dqueue=dq, submgr=sm, config=cfg, cookies_path=cookies_path)
 
 

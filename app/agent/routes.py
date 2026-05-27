@@ -12,6 +12,7 @@ from . import config as agent_config
 from . import sse as agent_sse
 from . import tools as agent_tools
 from . import tracing as agent_tracing
+from .backend import InProcessBackend
 from .live_state import AgentLiveState, wrap_notifier
 
 log = logging.getLogger(__name__)
@@ -46,10 +47,10 @@ def register_agent_routes(
     state = AgentLiveState()
     wrap_notifier(notifier, state)
 
-    agent_tools.bind(
+    agent_tools.bind(InProcessBackend(
         dqueue=dqueue, submgr=submgr, config=config,
         cookies_path=cookies_path, live_state=state,
-    )
+    ))
     agent = agent_build.build_agent()
     runtime = agent_sse.AgentRuntime(agent)
     app['agent_runtime'] = runtime
