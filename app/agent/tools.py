@@ -84,7 +84,11 @@ async def cancel_add() -> dict:
 
 
 async def start_downloads(ids: list[str]) -> dict:
-    """Start one or more pending downloads."""
+    """Start one or more pending downloads.
+
+    Each item in `ids` must be the download's **`url` field**, not the
+    `id` field — MeTube's persistent queue is keyed by URL.
+    """
     return await _backend.start_downloads(ids)
 
 
@@ -94,6 +98,12 @@ async def delete_downloads(
     tool_context: ToolContext,
 ) -> dict:
     """Delete downloads. `where` must be 'queue' (cancel) or 'done' (clear).
+
+    IMPORTANT: each item in `ids` must be the download's **`url` field**
+    (e.g. `https://www.youtube.com/watch?v=dQw4w9WgXcQ`), NOT the `id`
+    field. MeTube's persistent queue is keyed by URL; passing a video
+    id silently no-ops with a "non-existent download" warning. Pull
+    the `url` from `get_history()` and pass it back here.
 
     Destructive: confirmation required on first call.
     """
