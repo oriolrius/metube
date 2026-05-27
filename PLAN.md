@@ -15,7 +15,7 @@ protocol for external callers.
 | D3 | **Embedded `/agent/chat` SSE** in MeTube **+ A2A sidecar process** sharing the same `LlmAgent` *code* (not the same object). | `to_a2a()` returns a Starlette ASGI app and cannot mount under aiohttp; the sidecar is the only working shape. |
 | D4 | **HITL only for `delete_downloads` and `delete_subscriptions`.** All other mutating tools auto-execute. | Limits friction; only truly destructive actions gate behind confirmation. |
 | D5 | **Tracing day one**: ADK (OTEL) + LiteLLM both → Langfuse at `https://lf.joor.net`. | Two views — agent reasoning and proxy cost — merged by shared `trace_id`. |
-| D6 | **ADK version is unpinned until Step 0** verifies upstream docs. | The earlier draft cited a 2026-05-19 GA and a `NodeInterruptedError` API that haven't been independently confirmed. |
+| D6 | **`google-adk>=2.1,<3`** (2.1.0 released 2025-12-12, supports Python 3.13). HITL uses ADK's native `FunctionTool(require_confirmation=…)` API. **`AGENT_MODEL=claude-haiku-free`** (LiteLLM alias routing direct to Anthropic `claude-haiku-4-5`). | Verified via PyPI + adk.dev + LiteLLM `/v1/models`. See "Step 0 results" below. |
 
 ## Goals
 
@@ -57,28 +57,40 @@ Both processes import the same `build_agent()` factory from
 needs `dqueue` / `submgr`), so it runs in the same container with a
 shared state directory and binds to a different port.
 
-## Step 0 — verification gate (do these before writing code)
+## Step 0 — verification gate (results)
 
-Hard prerequisites; pausing here is the explicit decision in D6.
+Completed 2026-05-27. Findings drive the rest of the plan.
 
-- [ ] Confirm current `google-adk` release line on PyPI and which
-      Python versions it supports (MeTube pins `>=3.13` in
-      `pyproject.toml:5`).
-- [ ] Confirm whether ADK exposes an Action-confirmations / interrupt
-      API for HITL, and what its real name is. If it does **not**, fall
-      back to ADK's `before_tool_callback` pattern for D4.
-- [ ] Confirm `google.adk.models.lite_llm.LiteLlm` parameter names
-      (`api_base` vs `base_url`, etc.) against the installed version.
-- [ ] Confirm `to_a2a()` import path and signature
-      (`google.adk.a2a.utils.agent_to_a2a` is what the previous draft
-      claimed — verify).
-- [ ] Confirm the LiteLLM proxy alias for the Haiku model:
-      `bash ~/.claude/skills/skill-litellm/scripts/api.sh GET /model/info`
-      and pick whatever alias is actually exposed.
-- [ ] Decide `AGENT_MODEL` default after the alias check above.
+- **google-adk 2.1.0** released 2025-12-12 (PyPI), `requires_python>=3.10`,
+  classifiers list Python 3.13. Pin: `google-adk>=2.1,<3`.
+- **HITL is built in**: `FunctionTool(fn, require_confirmation=True|callable)`
+  and inside the tool `tool_context.request_confirmation(hint, payload)` /
+  `tool_context.tool_confirmation`. No `NodeInterruptedError`, no graph
+  engine — earlier drafts of this plan invented those. Approval flow:
+  caller resumes the runner by sending a `FunctionResponse` with
+  `confirmed=True` and the payload. Source:
+  https://adk.dev/tools-custom/confirmation/
+- **LiteLlm wrapper**: `from google.adk.models.lite_llm import LiteLlm`.
+  Constructor is `LiteLlm(model: str, **kwargs)`. Both `api_base` and
+  `api_key` are passed through as kwargs to the underlying `litellm`
+  call.
+- **A2A helper**: `from google.adk.a2a.utils.agent_to_a2a import to_a2a`.
+  Signature: `to_a2a(agent, *, host="localhost", port=8000, protocol="http",
+  agent_card=None, ...) -> Starlette`. Marked `@a2a_experimental` in
+  2.1.0 — acceptable but worth pinning carefully.
+- **OpenInference instrumentor**: `openinference-instrumentation-google-adk`
+  0.1.15 on PyPI, import
+  `from openinference.instrumentation.google_adk import GoogleADKInstrumentor`.
+  Supports Python 3.13.
+- **LiteLLM proxy alias**: `claude-haiku-free` routes direct to Anthropic
+  `claude-haiku-4-5` (200k input tokens, no OpenRouter hop). Confirmed via
+  `GET /model/info`. This is `AGENT_MODEL`.
 
-Update §Tool surface and §LiteLLM integration with the verified names
-before Step 1.
+Open follow-ups (not blocking implementation):
+
+- Confirm `claude-haiku-free`'s rate-limit / "free" semantics on the
+  proxy (LiteLLM team budget vs Anthropic free tier — TBD when we issue
+  the virtual key).
 
 ## Tool surface
 
@@ -178,7 +190,7 @@ and `docker-entrypoint.sh`):
 | `AGENT_ENABLED` | `false` | Feature flag — also added to `Config._FRONTEND_KEYS` (`app/main.py:129`) so the UI knows whether to render the chat panel |
 | `LITELLM_BASE_URL` | `https://litellm.joor.net/v1` | OpenAI-compatible endpoint |
 | `LITELLM_API_KEY` | (required when enabled) | Budget-capped virtual key `sk-litellm-…` |
-| `AGENT_MODEL` | TBD after Step 0 | Model alias on the LiteLLM proxy |
+| `AGENT_MODEL` | `claude-haiku-free` | LiteLLM proxy alias → Anthropic `claude-haiku-4-5` direct (verified in Step 0) |
 | `AGENT_A2A_PORT` | `8082` | Sidecar uvicorn port (only used by `a2a_sidecar.py`) |
 | `LANGFUSE_HOST` | `https://lf.joor.net` | OTEL exporter target |
 | `LANGFUSE_PUBLIC_KEY` | (required when enabled) | `pk-lf-…` |
@@ -202,15 +214,14 @@ No `AGENT_SESSION_DB` (D2). No `METUBE_INTERNAL_URL` (D1).
    Store the returned `sk-litellm-…` in Bitwarden as
    `MeTube Agent LiteLLM Key` and inject via `LITELLM_API_KEY`.
 
-2. **ADK ↔ LiteLLM wiring** (`app/agent/build.py`) — exact parameter
-   names depend on Step 0 verification, sketch only:
+2. **ADK ↔ LiteLLM wiring** (`app/agent/build.py`), verified shape:
    ```python
    from google.adk.agents import LlmAgent
    from google.adk.models.lite_llm import LiteLlm
 
    def build_agent():
        model = LiteLlm(
-           model=f"openai/{AGENT_MODEL}",
+           model=f"openai/{AGENT_MODEL}",  # forces LiteLLM's OAI-compat router
            api_base=LITELLM_BASE_URL,
            api_key=LITELLM_API_KEY,
        )
@@ -221,6 +232,9 @@ No `AGENT_SESSION_DB` (D2). No `METUBE_INTERNAL_URL` (D1).
            tools=[...],  # from app.agent.tools
        )
    ```
+   `LiteLlm.__init__` is `(model, **kwargs)`; everything except `model`
+   is forwarded to the underlying `litellm.completion` call, so any
+   LiteLLM-supported kwarg works.
 
 3. **Tagging**: pass
    `extra_body={"metadata": {"project": "metube", "tags": ["metube-agent"]}}`
@@ -230,19 +244,43 @@ No `AGENT_SESSION_DB` (D2). No `METUBE_INTERNAL_URL` (D1).
 
 Two tools require confirmation: `delete_downloads`, `delete_subscriptions`.
 
-Mechanism depends on Step 0:
+Mechanism (verified in Step 0): ADK's built-in confirmation API.
 
-- **If ADK 2.x has a first-class interrupt API**: tools raise the
-  interrupt with the proposed payload; the runner emits a
-  `confirmation_required` event that the SSE handler relays to the UI;
-  `POST /<prefix>agent/confirm {token, approve}` resumes the runner.
-- **If not** (fallback): use `before_tool_callback` on the `LlmAgent`
-  to intercept calls to those two tools, persist a pending-confirmation
-  record keyed by `token`, return a placeholder event, and have the
-  same `/<prefix>agent/confirm` endpoint complete the original call.
+```python
+from google.adk.tools import FunctionTool, ToolContext
 
-Either way, the confirmation token store lives in `app/agent/hitl.py`,
-in-memory only (consistent with D2).
+async def delete_downloads(ids: list[str], where: str,
+                            tool_context: ToolContext) -> dict:
+    if not tool_context.tool_confirmation:
+        tool_context.request_confirmation(
+            hint=f"Delete {len(ids)} item(s) from '{where}'?",
+            payload={"ids": ids, "where": where},
+        )
+        return {"status": "awaiting_confirmation"}
+    # On resume, payload comes back through tool_confirmation.payload
+    payload = tool_context.tool_confirmation.payload
+    return await _do_delete(payload["ids"], payload["where"])
+
+tools = [
+    FunctionTool(delete_downloads, require_confirmation=True),
+    # …
+]
+```
+
+Wiring on the aiohttp side (`app/agent/sse.py` + `routes.py`):
+
+- The SSE handler relays the `request_confirmation` event verbatim to
+  the UI (it includes the `hint`, `payload`, and a confirmation id the
+  runner generated).
+- The UI POSTs to `<prefix>agent/confirm` with
+  `{confirmation_id, approve: bool, payload_overrides?: dict}`.
+- The handler resumes the runner by sending a `FunctionResponse` with
+  the confirmed/denied status — exact API on `Runner` is verified at
+  implementation time against installed 2.1.x.
+
+`app/agent/hitl.py` holds the **pending-confirmation map** (id → SSE
+session) so the resume can find the right runner stream. In-memory
+only (D2).
 
 D2 caveat (honest about the tradeoff): with a single shared session,
 **any browser viewing the chat can approve any other browser's pending
@@ -260,11 +298,14 @@ the existing `routes` table, prefixed with `config.URL_PREFIX`:
 **A2A sidecar** — `a2a_sidecar.py` at repo root:
 
 ```python
-from google.adk.a2a.utils.agent_to_a2a import to_a2a  # verify in Step 0
+from google.adk.a2a.utils.agent_to_a2a import to_a2a
 from app.agent.build import build_agent
 
-app = to_a2a(build_agent())  # Starlette ASGI app
-# run with: uvicorn a2a_sidecar:app --port ${AGENT_A2A_PORT:-8082}
+# to_a2a is decorated @a2a_experimental in 2.1.x; signature:
+#   to_a2a(agent, *, host="localhost", port=8000, protocol="http",
+#          agent_card=None, ...) -> starlette.applications.Starlette
+app = to_a2a(build_agent(), host="0.0.0.0", port=int(os.environ.get("AGENT_A2A_PORT", "8082")))
+# run with: uvicorn a2a_sidecar:app --host 0.0.0.0 --port ${AGENT_A2A_PORT:-8082}
 ```
 
 Sidecar publishes `/.well-known/agent-card.json` and `/a2a/v1` on its
